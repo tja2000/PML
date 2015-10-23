@@ -1,21 +1,149 @@
 ---
-title: "PMLProject"
+title: "PML Project 2015"
 author: "TJA"
-date: "10 oktober 2015"
-output: html_document
+output: 
+  html_document:
+    theme: spacelab
+    fig_height: 7
+    keep_md: yes
+    number_sections: no    
 ---
+#Introduction
+Using devices such as Jawbone Up, Nike FuelBand, and Fitbit it is now possible to collect a large amount of data about personal activity relatively inexpensively. These type of devices are part of the quantified self movement - a group of enthusiasts who take measurements about themselves regularly to improve their health, to find patterns in their behavior, or because they are tech geeks. One thing that people regularly do is quantify how much of a particular activity they do, but they rarely quantify how well they do it. In this project, your goal will be to use data from accelerometers on the belt, forearm, arm, and dumbell of 6 participants. They were asked to perform barbell lifts correctly and incorrectly in 5 different ways. More information is available from the website here: http://groupware.les.inf.puc-rio.br/har (see the section on the Weight Lifting Exercise Dataset).
 
+#Getting and preparing the data
+#Getting the data
+Load the libraries and files with the training and validation data.
+```{r,eval=FALSE }
+# Load the libraries here, other wise we get al ot of verbosing in the calculations.
+library(knitr,quietly=TRUE) ; library(caret,quietly=TRUE) ; library(rpart,quietly=TRUE) 
+library(randomForest,quietly=TRUE) ; library(doParallel,quietly=TRUE)
+library(survival, quietly=TRUE) ; library(splines, quietly=TRUE) ; library(plyr, quietly=TRUE) ; 
+library(gbm, quietly=TRUE) ; library(MASS, quietly=TRUE) 
 
-#Getting and Cleaning Data
-```{r}
+# Get files from disk.
 training <- read.csv("pml-training.csv", header = TRUE)
-test  <- read.csv('pml-testing.csv')
+validation  <- read.csv('pml-testing.csv')
+```
+## Cleaning the data
+Clean up NA's and remove near zero covariates, remove columns that are not used.
+```{r, eval=FALSE}
+# Get the columns with NA and remove them from the training set.
+nasCols<- apply(training,2,function(x) {sum(is.na(x))});
+training <- training[,which(nasCols == 0)];
+
+# Make sure to factorise it.
+training$classe <- factor(training$classe)
+
+# Remove Nero Zero CoVars
+nzvc <- nearZeroVar(training,saveMetrics=TRUE) 
+training <- training[, nzvc$nzv==FALSE]
+
+# Remove some columns we think that are not needed for the modelling: 
+toremove <- names(training) %in% c("X","num_window","user_name","raw_timestamp_part_1", "raw_timestamp_part_2","cvtd_timestamp", "new_window","kurtosis_yaw_belt", "kurtosis_yaw_dumbbell", "kurtosis_yaw_forearm","skewness_yaw_belt", "skewness_yaw_dumbbell", "skewness_yaw_forearm","amplitude_yaw_belt", "amplitude_yaw_dumbbell", "amplitude_yaw_forearm")
+training <- training[!toremove]
+```
+##Prepare test and training data
+Split the data: 60% for training, 40% for testing.
+```{r, eval=FALSE}
+# Split
+set.seed(50)
+trainingIndex <- createDataPartition(y = training$classe, p=0.6,list=FALSE)
+trainingPartition <- training[trainingIndex,]
+testingPartition <- training[-trainingIndex,]
+```
+#The Accuracy of the different models
+We try out a few models to see which one is best: Random forest ("rf"), Boosted trees ("gbm") and Linear discriminant analysis ("lda"). We display for each of them the accuracy. This is done using a custom function *ModelCalcAcc* that executes the different steps. The details are below:
+
+```{r, echo=TRUE, eval=FALSE}
+# Create a function to get the accurary for the different models
+ModelCalcAcc <- function(par_method)
+{
+  set.seed(2266)
+  
+  # Generate the model 
+  if (par_method=="rfx") {
+    # A lot faster and  almost the same accurary as the train function from caret
+    model <- randomForest(classe ~ ., method=par_method,data=trainingPartition)  
+  }
+  else {
+    # Otherwise use the train function from caret
+    model <- train(classe ~ ., method=par_method,data=trainingPartition,verbose=FALSE)
+  }
+  
+  # Predict and get accuracy
+  acc <- predict(model,testingPartition)
+  
+  # Calc the confusion matrix
+  cM <- confusionMatrix(testingPartition$classe,acc)
+  
+  # Return the accuracy
+  return(cM$overall[1])
+}  
+```
+We call the function on each model, making use of the parallel package where possible:
+```{r, eval=FALSE, echo=FALSE}
+# Call on each of them the ModelCalcAcc and return the accuracy:
+# Parallel, where possible...not for rpart
+cl <-makeCluster(detectCores()) ;  registerDoParallel(cl) 
+acc_gbm <- round(ModelCalcAcc("gbm"),4)
+acc_lda <- round(ModelCalcAcc("lda"),4)
+acc_fr  <-  round(ModelCalcAcc("rf"),4)
+paste("Boosted trees (gbm) = ",acc_gbm )
+paste("Linear discriminant analysis (lda) = ",acc_lda)
+paste("Random Forest (rf) = ", acc_fr)
+```
+For the Boosted trees we have <b>0.965</b>, for Linear discriminant analysis we have <b>0.697 </b> and for Random Forest we have <b>0.990</b>. 
+
+As can be seen the <b>"Random Forest Model"</b> is the best choice. Can we optimize this further using cross validation?
+
+#Cross validation and final accuracy
+##Cross Validation
+We do a RF 5 fold cross validation.
+```{r, eval=FALSE}
+set.seed(2266)
+# Calculate 
+controlf <- trainControl(method = "repeatedcv", number = 5, repeats = 5)
+#cl <-makeCluster(detectCores()) ;  registerDoParallel(cl) 
+model_cross_val <- train(classe ~ ., method="rf", data=trainingPartition, trControl = controlf)
 ```
 
-You can also embed plots, for example:
+##Final accuracy and out of sample error
+The accurary of the model with cross validation.
+```{r, eval=FALSE}
+acc_crossval <- predict(model_cross_val , testingPartition)
+cM <- confusionMatrix(acc_crossval, testingPartition$classe) 
+acc_value <-cM$overall[1] 
+```
+This accuracy is 0.993, that is a nearly the same than the original RF-accuracy.
+The out of sample error isequal to 1 - the accuracy of the new model, in this case: <b>0.007%</b>.
 
-```{r, echo=FALSE}
-plot(cars)
+##Variables importance
+What is the most important predictor for the model? 
+
+We use the *importance* variable from the model to determine this:
+```{r, eval=FALSE}
+vi <- model_cross_val$finalModel$importance
+# Order on the Accuracy column, decreasing.
+vi <- as.matrix(vi[ order(-vi[,1],decreasing=FALSE),])
+imppred <- rownames(vi)[1]
+```
+We can see that <b>roll_belt</b> is the most important predictor for the optimal model.
+
+#The 20 test cases
+Writing out the files for the 20 test cases:
+```{r, eval=FALSE}
+pml_write_files = function(x){
+  n = length(x)
+  for(i in 1:n){
+    filename = paste0("problem_id_",i,".txt")
+    write.table(x[i],file=filename,quote=FALSE,row.names=FALSE,col.names=FALSE)
+  }
+}
+
+pre <- predict(model_cross_val, validation)
+print(pre)
+answers <- as.vector(pre)
+pml_write_files(answers)
 ```
 
-Note that the `echo = FALSE` parameter was added to the code chunk to prevent printing of the R code that generated the plot.
